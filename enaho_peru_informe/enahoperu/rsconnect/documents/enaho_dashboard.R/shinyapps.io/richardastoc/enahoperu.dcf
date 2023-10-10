@@ -1,0 +1,12 @@
+name: enahoperu
+title: enahoperu
+username: richardastoc
+account: richardastoc
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 10124268
+bundleId: 7782662
+url: https://richardastoc.shinyapps.io/enahoperu/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

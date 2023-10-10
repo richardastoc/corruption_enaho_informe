@@ -1,0 +1,711 @@
+library(tidyverse)
+library(rvest)
+library(readr)
+library(ggplot2)
+library(ggradar)
+library(stargazer)
+library(shiny)
+library(plm)
+library('lmtest')
+library(shinydashboard)
+library(ggcorrplot)
+library(jtools)
+library(plotROC)
+library(broom.mixed)
+
+datos_master=as.data.frame(read_rds('datos_master.rds'))
+
+ubigeo_departamento=datos_master%>%
+  select(ubigeo,departamento,provincia)%>%
+  unique()
+
+datos_master_indiv=as.data.frame(read_rds('datos_master_crosssection.rds'))%>%
+  select(-emprendimientoMYPE)%>%
+  rename(ccdd=departamento)%>%
+  left_join(ubigeo_departamento,
+            by='ubigeo')
+  
+
+ui=dashboardPage(
+  title="Dashboard ENAHO",
+  #skin='light-blue',
+  dashboardHeader(
+    title = 'Empleo-Corrupción',
+    titleWidth = 350
+  ),
+  dashboardSidebar(
+    width = 150,
+    sidebarMenu(id='sidebarID',
+                
+                selectInput('ccdd_radar','',
+                            c(sort(unique(datos_master$departamento)),
+                              'Perú'),'Perú'),
+                
+                menuItem('Provincial',
+                
+                menuSubItem('Overview',tabName = 'graph'),
+                menuSubItem('Resultados',tabName = 'regre'),
+                menuSubItem('Datos',tabName = 'datos')
+                ),
+                
+                menuItem('Individual',
+                menuSubItem('Resultados',tabName = 'regre_indiv'),
+                menuSubItem('Datos',tabName = 'datos_indiv')
+                )
+                
+    )
+    
+    
+  ),
+  dashboardBody(
+    
+    tags$head(tags$style(HTML('
+      .main-header .logo {
+        font-family: "Georgia", Times, "Times New Roman", serif;
+        font-weight: bold;
+        font-size: 24px;
+      }
+    '))),
+    
+    tabItems(
+      tabItem(tabName = 'graph',
+              fluidRow(
+                column(width = 5,
+                       
+                       tabsetPanel(
+                         tabPanel('C.Empleo',
+                                  box(plotOutput('hist_cempleo'),
+                                      status = 'success',width=NULL, solidHeader = TRUE)),
+                         tabPanel('Corrupción',
+                                  box(plotOutput('hist_corrup'),
+                                      status = 'success',width=NULL, solidHeader = TRUE)),
+                        # tabPanel('Avance',
+                         #         box(plotOutput('hist_avance'),
+                          #            status = 'success',width=NULL, solidHeader = TRUE)),
+                         tabPanel('Educación',
+                                  box(plotOutput('hist_educacion'),
+                                      status = 'success',width=NULL, solidHeader = TRUE)),
+                         tabPanel('Mujer',
+                                  box(plotOutput('hist_mujer'),
+                                      status = 'success',width=NULL, solidHeader = TRUE)),
+                         tabPanel('Adulto',
+                                  box(plotOutput('hist_viejo'),
+                                      status = 'success',width=NULL, solidHeader = TRUE))
+                       )
+                       
+                ),
+                column(width = 7,
+                       box(title = 'Características estructurales: 2011-2022',
+                           plotOutput('radar_graph'),
+                           status = 'success',width=NULL, solidHeader = TRUE)
+                )
+              )),
+      tabItem(tabName = 'regre',
+              
+              fluidRow(
+                
+                column(width = 4.2,
+                       box(title='Crecimiento de empleo MYPE', solidHeader = TRUE,status = 'success',uiOutput('regresion_cp'))
+                ),
+                column(width = 4.2,
+                       box(title='Empleo MYPE', solidHeader = TRUE,status = 'success',uiOutput('regresion_lp'))
+                )
+                )
+      ),
+      tabItem(tabName = 'datos',
+              DT::dataTableOutput('datos')),
+      
+      tabItem(tabName = 'regre_indiv',
+              
+              fluidRow(
+
+                column(width = 4.2,
+                       box(title='Efectos Marginales empleo MYPE',
+                           selectInput('ccdd_year','',
+                                       c(sort(unique(datos_master$year))),
+                                       '2022'),
+                           solidHeader = TRUE,status = 'success',plotOutput('marginal_individual'))
+                ),
+                column(width = 4.2,
+                       box(title='Logit- empleo MYPE',
+                           solidHeader = TRUE,status = 'success',uiOutput('regresion_individual'))
+                )
+                ),
+              fluidRow(column(width = 4.2,
+                              box(title='ROC empleo MYPE',
+                                  solidHeader = TRUE,status = 'success',plotOutput('roc_individual'))
+              ))
+                
+              
+      ),
+      tabItem(tabName = 'datos_indiv',
+              DT::dataTableOutput('datos_indiv'))
+      
+      
+      
+    )
+    
+  )
+)
+
+server=function(input,output){
+  
+  hist_peru_datos=datos_master%>%
+    mutate(corrupcion=round(corrupcion,2),
+           avance=round(avance,2),
+           empleo=round(mype,2),
+           cempleo=round(odds1,2),
+           departamento=departamento,
+           educacion=round(educsup,2),
+           mujer=round(mujer,2),
+           viejo=round(viejo,2),
+           pob=round(POB,2),
+           ubigeo,
+           provincia)%>%
+    select(year,departamento,provincia,
+           corrupcion,avance,empleo,cempleo,educacion,mujer,viejo,pob,ubigeo)
+  
+  output$datos=DT::renderDataTable(hist_peru_datos)
+  
+  output$datos_indiv=DT::renderDataTable(datos_master_indiv)
+  
+  output$radar_graph=renderPlot({
+    if(input$ccdd_radar!='Perú'){
+      
+      datos_radar=datos_master%>%
+      filter(departamento==input$ccdd_radar)%>% #input$ccdd_radar
+      group_by(provincia)%>%  
+      summarise(
+          corrupcion=mean(corrupcion),
+          avance=mean(avance),
+          empleo=mean(mype),
+          educacion=mean(educsup),
+          mujer=mean(mujer),
+          viejo=mean(viejo)
+        )
+      
+      ggradar(datos_radar,
+              grid.min = min(
+                min(datos_radar$corrupcion),
+                min(datos_radar$avance),
+                min(datos_radar$empleo),
+                min(datos_radar$educacion),
+                min(datos_radar$mujer),
+                min(datos_radar$viejo)
+              ),
+              grid.max = max(
+                max(datos_radar$corrupcion),
+                max(datos_radar$avance),
+                max(datos_radar$empleo),
+                max(datos_radar$educacion),
+                max(datos_radar$mujer),
+                max(datos_radar$viejo)
+              ),
+              values.radar = '')
+    }else{
+      
+      datos_radar_peru=datos_master%>%  
+        group_by(year)%>% 
+        summarise(
+          corrupcion=mean(corrupcion),
+          avance=mean(avance),
+          empleo=mean(mype),
+          educacion=mean(educsup),
+          mujer=mean(mujer),
+          viejo=mean(viejo)
+        )
+      
+      ggradar(datos_radar_peru,
+              grid.min = min(
+                min(datos_radar_peru$corrupcion),
+                min(datos_radar_peru$avance),
+                min(datos_radar_peru$empleo),
+                min(datos_radar_peru$educacion),
+                min(datos_radar_peru$mujer),
+                min(datos_radar_peru$viejo)
+              ),
+              grid.max = max(
+                max(datos_radar_peru$corrupcion),
+                max(datos_radar_peru$avance),
+                max(datos_radar_peru$empleo),
+                max(datos_radar_peru$educacion),
+                max(datos_radar_peru$mujer),
+                max(datos_radar_peru$viejo)
+              ),
+              values.radar = '')
+    }
+    
+  })
+  
+  datos_histogramas=datos_master%>%
+    mutate(corrupcion=round(corrupcion,2),
+           avance=round(avance,2),
+           empleo=round(mype,2),
+           cempleo=round(odds1,2),
+           departamento=departamento,
+           educacion=round(educsup,2),
+           mujer=round(mujer,2),
+           viejo=round(viejo,2),
+           pob=POB,
+           ubigeo,
+           provincia)%>%
+    select(year,departamento,provincia,
+           corrupcion,avance,empleo,cempleo,educacion,mujer,viejo,pob,ubigeo)
+  
+  
+  output$hist_cempleo=renderPlot({
+    if(input$ccdd_radar!='Perú'){
+      datos_hist=datos_histogramas%>%
+        filter(departamento==input$ccdd_radar)#input$ccdd_radar
+      
+      hist(datos_hist$cempleo,
+           xlab = 'Crecimiento de Empleo MYPE',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 10,
+           main = '')
+    }else{
+      datos_hist=datos_histogramas
+      
+      hist(datos_hist$cempleo,
+           xlab = 'Crecimiento de Empleo MYPE',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 100,
+           main = '')
+    }
+    
+  })
+  output$hist_corrup=renderPlot({
+    if(input$ccdd_radar!='Perú'){
+      datos_hist=datos_histogramas%>%
+        filter(departamento==input$ccdd_radar)#input$ccdd_radar
+      
+      hist(datos_hist$corrupcion,
+           xlab = 'Crecimiento de Empleo MYPE',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 10,
+           main = '')
+    }else{
+      datos_hist=datos_histogramas
+      
+      hist(datos_hist$corrupcion,
+           xlab = 'Percepción de la corrupción',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 100,
+           main = '')
+    }
+    
+  })
+  output$hist_avance=renderPlot({
+    if(input$ccdd_radar!='Perú'){
+      datos_hist=datos_histogramas%>%
+        filter(departamento==input$ccdd_radar)#input$ccdd_radar
+      
+      hist(datos_hist$avance,
+           xlab = 'Ejecución presupuestal',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 10,
+           main = '')
+    }else{
+      datos_hist=datos_histogramas
+      
+      hist(datos_hist$avance,
+           xlab = 'Ejecución presupuestal',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 100,
+           main = '')
+    }
+    
+  })
+  output$hist_educacion=renderPlot({
+    
+    if(input$ccdd_radar!='Perú'){
+      datos_hist=datos_histogramas%>%
+        filter(departamento==input$ccdd_radar)#input$ccdd_radar
+      
+      hist(datos_hist$educacion,
+           xlab = 'Educación superior',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 10,
+           main = '')
+    }else{
+      datos_hist=datos_histogramas
+      
+      hist(datos_hist$educacion,
+           xlab = 'Educación superior',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 100,
+           main = '')
+    }
+    
+  })
+  
+  output$hist_mujer=renderPlot({
+    if(input$ccdd_radar!='Perú'){
+      datos_hist=datos_histogramas%>%
+        filter(departamento==input$ccdd_radar)#input$ccdd_radar
+      
+      hist(datos_hist$mujer,
+           xlab = 'Mujer',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 10,
+           main = '')
+    }else{
+      datos_hist=datos_histogramas
+      
+      hist(datos_hist$mujer,
+           xlab = 'Mujer',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 100,
+           main = '')
+    }
+    
+  })
+  
+  output$hist_viejo=renderPlot({
+    
+    if(input$ccdd_radar!='Perú'){
+      datos_hist=datos_histogramas%>%
+        filter(departamento==input$ccdd_radar)#input$ccdd_radar
+      
+      hist(datos_hist$viejo,
+           xlab = 'Adultos',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 10,
+           main = '')
+    }else{
+      datos_hist=datos_histogramas
+      
+      hist(datos_hist$viejo,
+           xlab = 'Adultos',
+           freq = FALSE,
+           ylab = 'Densidad',
+           breaks = 100,
+           main = '')
+    }
+    
+  })
+  
+  output$regresion_cp=renderText({
+    
+    if(input$ccdd_radar!='Perú'){
+      
+      datos_depart=datos_master%>%
+        select(year,departamento,provincia,
+               corrupcion,corrupc2,avance,mype,odds1,
+               educsup,mujer,viejo,POB,ubigeo,dummy_c)%>%
+        filter(departamento==input$ccdd_radar) #
+      
+      fixed_efects_depart<-plm(odds1 ~corrupcion+corrupc2+mujer+viejo+educsup+POB+dummy_c,
+                               data = datos_depart,
+                           model = 'pooling')
+      
+      aux=coeftest(fixed_efects_depart,vcov. = vcovHC,type = "HC1")
+      
+      stargazer(aux,
+                type = "html",
+                title = "DataPanel Pooling",
+                omit.stat=c("LL","ser","f"),
+                covariate.labels=c("corrupción",'corrupción2',"mujeres",
+                                   "adultos",
+                                   #"ejecución",
+                                   'educación','población','dummy','constante'))
+      
+    }else{
+      
+      datos_pais=datos_master%>%
+        select(year,departamento,provincia,
+               corrupcion,corrupc2,avance,mype,odds1,
+               educsup,mujer,viejo,POB,ubigeo,dummy_c)
+      
+      fixed_efects_pais<-plm(odds1~corrupcion+corrupc2+mujer+viejo+educsup+POB+dummy_c,
+                               data = datos_pais,
+                               model = 'pooling')
+      
+      aux=coeftest(fixed_efects_pais,vcov. = vcovHC,type = "HC1")
+      
+      stargazer(aux,
+                type = "html",
+                title = "DataPanel Pooling",
+                omit.stat=c("LL","ser","f"),
+                covariate.labels=c("corrupción",'corrupción2',"mujeres",
+                                   "adultos",
+                                   #"ejecución",
+                                   'educación','población','dummy','constante'))
+    }
+  })
+  
+  output$regresion_lp=renderText({
+    
+    if(input$ccdd_radar!='Perú'){
+      
+      datos_depart_lp=datos_master%>%
+        select(year,departamento,provincia,
+               corrupcion,corrupc2,avance,mype,odds1,
+               educsup,mujer,viejo,POB,ubigeo,dummy_c,
+               internet)%>%
+        filter(departamento==input$ccdd_radar)%>% #input$ccdd_radar
+        group_by(provincia)%>%
+        summarise(empleo=mean(mype),
+                  corrupcion=mean(corrupcion),
+                  corrupcion2=mean(corrupcion*corrupcion),
+                  educacion=mean(educsup),
+                  mujeres=mean(mujer),
+                  adultos=mean(viejo),
+                  poblacion=log(mean(exp(POB))),
+                  avance=mean(avance),
+                  internet=mean(internet)
+                  )
+      
+      ols_depart<-MASS::rlm(empleo~corrupcion+mujeres+adultos+
+                       avance+educacion+poblacion,data = datos_depart_lp)
+      
+      aux=coeftest(ols_depart,vcov. = vcovHC,type = "HC1")
+      
+      stargazer(aux,
+                type = "html",
+                title = "Cross-Section: 2012-2022",
+                omit.stat=c("LL","ser","f"),
+                covariate.labels=c("corrupción",
+                                   "mujeres",
+                                   "adultos",
+                                   "ejecución",
+                                   'educación',
+                                   #'internet',
+                                   'población',
+                                   'constante'))
+    }else{
+      datos_pais_lp=datos_master%>%
+        select(year,departamento,provincia,
+               corrupcion,corrupc2,avance,mype,odds1,
+               educsup,mujer,viejo,POB,ubigeo,dummy_c,
+               internet)%>%
+        group_by(provincia)%>%
+        summarise(empleo=mean(mype),
+                  corrupcion=mean(corrupcion),
+                  corrupcion2=mean(corrupcion*corrupcion),
+                  educacion=mean(educsup),
+                  mujeres=mean(mujer),
+                  adultos=mean(viejo),
+                  poblacion=log(mean(exp(POB))),
+                  avance=mean(avance),
+                  internet=mean(internet)
+        )
+      
+      ols_depart<-MASS::rlm(empleo~corrupcion+mujeres+adultos+
+                       avance+educacion+poblacion,data = datos_pais_lp)
+      
+      aux=coeftest(ols_depart,vcov. = vcovHC,type = "HC1")
+      
+      stargazer(aux,
+                type = "html",
+                title = "Cross-Section: 2012-2022",
+                omit.stat=c("LL","ser","f"),
+                covariate.labels=c("corrupción","mujeres",
+                                   "adultos",
+                                   "ejecución",
+                                   'educación',
+                                   #'internet',
+                                   'población',
+                                   'constante'))
+    }
+  })
+  
+  output$regresion_individual=renderText({
+    
+    if(input$ccdd_radar!='Perú'){
+      
+      regre_empleo=glm(mype~corrupcion+municipal+mujer+adulto+soltero+propietario+juntos+internet+
+                         capacitacion,
+                       data = datos_master_indiv%>%
+                         filter(periodo==input$ccdd_year,
+                                departamento==input$ccdd_radar
+                         ),
+                       family=binomial('logit'))
+      
+      #summary(regre_empleo)
+      
+      #aux=coeftest(regre_empleo,vcov. = vcovHC,type = "HC1")
+      
+      stargazer(regre_empleo,
+                type = "html",
+                #title = "Modelo logit",
+                omit.stat=c("LL","ser","f",'AIC','n'),
+                covariate.labels=c("corrupción",
+                                   'confianza-municipal',
+                                   "mujeres",
+                                   "adultos",
+                                   "soltero",
+                                   'propietario',
+                                   'programa-juntos',
+                                   'internet',
+                                   'capacitación',
+                                   'constante'))
+    }else{
+      
+      regre_empleo=glm(mype~corrupcion+municipal+mujer+adulto+soltero+propietario+juntos+internet+
+                         capacitacion,
+                       data = datos_master_indiv%>%
+                         filter(periodo==input$ccdd_year
+                         ),
+                       family=binomial('logit'))
+      
+      #summary(regre_empleo)
+      
+      #aux=coeftest(regre_empleo,vcov. = vcovHC,type = "HC1")
+      
+      stargazer(regre_empleo,
+                type = "html",
+                #title = "Modelo logit",
+                omit.stat=c("LL","ser","f",'AIC','n'),
+                covariate.labels=c("corrupción",
+                                   'confianza-municipal',
+                                   "mujeres",
+                                   "adultos",
+                                   "soltero",
+                                   'propietario',
+                                   'programa-juntos',
+                                   'internet',
+                                   'capacitación',
+                                   'constante'))
+    }
+  })
+  
+  output$marginal_individual=renderPlot({
+    
+    if(input$ccdd_radar!='Perú'){
+      
+      regre_empleo=glm(mype~corrupcion+municipal+mujer+adulto+soltero+propietario+juntos+internet+
+                         capacitacion,
+                       data = datos_master_indiv%>%
+                         filter(periodo==input$ccdd_year,
+                                departamento==input$ccdd_radar
+                         ),
+                       family=binomial('logit'))
+      
+      
+      
+      odds_ratios <- plot_summs(regre_empleo, scale = F,
+                                inner_ci_level = .9,
+                                coefs = c('Corrupción'='corrupcion',
+                                          'Confianza municipal'='municipal',
+                                          'Mujer'='mujer',
+                                          'Adulto'='adulto',
+                                          'Soltero'='soltero',
+                                          'Propietario'='propietario',
+                                          'Programa Juntos'='juntos',
+                                          'Internet'='internet',
+                                          'Capacitación'='capacitacion'
+                                          ),
+                                model.names = 'logit')
+      
+      graph=odds_ratios + labs(x = "Coeficientes exponenciados", y = NULL)
+      
+      graph
+
+     
+    }else{
+      
+      regre_empleo=glm(mype~corrupcion+municipal+mujer+adulto+soltero+propietario+juntos+internet+
+                         capacitacion,
+                       data = datos_master_indiv%>%
+                         filter(periodo==input$ccdd_year
+                         ),
+                       family=binomial('logit'))
+      
+    
+    
+      odds_ratios <- plot_summs(regre_empleo, scale = F,
+                                inner_ci_level = .9,
+                                coefs = c('Corrupción'='corrupcion',
+                                          'Confianza municipal'='municipal',
+                                          'Mujer'='mujer',
+                                          'Adulto'='adulto',
+                                          'Soltero'='soltero',
+                                          'Propietario'='propietario',
+                                          'Programa Juntos'='juntos',
+                                          'Internet'='internet',
+                                          'Capacitación'='capacitacion'
+                                ),
+                                model.names = 'logit')
+      
+      odds_ratios + labs(x = "Coeficientes exponenciados", y = NULL)
+      
+      
+    
+      }
+  })
+  
+  output$roc_individual=renderPlot({
+    
+    if(input$ccdd_radar!='Perú'){
+      
+      regre_empleo=glm(mype~corrupcion+municipal+mujer+adulto+soltero+propietario+juntos+internet+
+                         capacitacion,
+                       data = datos_master_indiv%>%
+                         filter(periodo==input$ccdd_year,
+                                departamento==input$ccdd_radar
+                         ),
+                       family=binomial('logit'))
+      
+      
+    
+      roc <- ggplot(regre_empleo, aes(d = mype, m = .fitted)) +
+        geom_roc(n.cuts = 0,colour = 'steelblue', size = 2) + 
+        geom_abline(slope = 1)+ 
+        style_roc()
+      
+      graph=roc+ 
+      annotate("text", x = .75, y = .25, 
+                 label = paste("AUC =", round(calc_auc(roc)$AUC, 2)))
+      
+      graph
+      #plot_interactive_roc(graph)
+      
+      
+    }else{
+      
+      regre_empleo=glm(mype~corrupcion+municipal+mujer+adulto+soltero+propietario+juntos+internet+
+                         capacitacion,
+                       data = datos_master_indiv%>%
+                         filter(periodo==input$ccdd_year
+                         ),
+                       family=binomial('logit'))
+      
+    
+      
+      
+      roc <- ggplot(regre_empleo, aes(d = mype, m = .fitted)) +
+        geom_roc(n.cuts = 0,colour = 'steelblue', size = 2) + 
+        geom_abline(slope = 1)+ 
+        style_roc()
+      
+      graph=roc+ 
+        annotate("text", x = .75, y = .25, 
+                 label = paste("AUC =", round(calc_auc(roc)$AUC, 2)))
+      
+      graph
+      #plot_interactive_roc(graph)
+      
+    }
+  })
+  
+  
+  
+  
+}
+
+shinyApp(ui,server)
+
+
+#format(Sys.Date(), '%d-%m-%Y')
